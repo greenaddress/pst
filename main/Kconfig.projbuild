@@ -1,0 +1,137 @@
+menu "ESP PSX TOOLS"
+
+    menu "WiFI & TCP"
+        config PSX_WIFI_SSID
+            string "WiFi SSID"
+            default "wpa2_test"
+            help
+                SSID (network name) for the esp32 to connect to.
+
+        config PSX_WIFI_PASS
+            string "WiFi Password"
+            default "123456789"
+            help
+                Password for the wifi SSID for the esp32 to connect to.
+
+        config PSX_TCP_PORT
+            int "TCP port to use to forward traffic to/from psx UART"
+            default 1
+            range 1 65535
+
+        config PSX_ESP_DEBUG_LOGS
+            bool "Enable debug logging for the ESP32"
+            default n
+            help
+                Enable debug mode for the ESP32, opens a new tcp port with the logs.
+
+        config PSX_TCP_PORT_LOGS
+            int "TCP port to use to forward traffic to/from psx UART"
+            default 2
+            depends on PSX_ESP_DEBUG_LOGS
+            range 1 65535
+
+        choice
+            prompt "LOG LEVEL"
+            default PSX_ESP_DEBUG_LOGS_INFO
+            depends on PSX_ESP_DEBUG_LOGS
+            config PSX_ESP_DEBUG_LOGS_ERROR
+                bool "Error"
+            config PSX_ESP_DEBUG_LOGS_WARNING
+                bool "Warning"
+            config PSX_ESP_DEBUG_LOGS_INFO
+                bool "Info"
+            config PSX_ESP_DEBUG_LOGS_DEBUG
+                bool "Debug"
+            config PSX_ESP_DEBUG_LOGS_VERBOSE
+                bool "Verbose"
+        endchoice
+    endmenu
+
+    menu "PC UART"
+        choice
+            prompt "PSX SERIAL_PC_UART"
+            default PSX_SERIAL_PC_UART_0
+            config PSX_SERIAL_PC_UART_0
+                bool "UART_NUM_0"
+            config PSX_SERIAL_PC_UART_1
+                bool "UART_NUM_1"
+            config PSX_SERIAL_PC_UART_2
+                bool "UART_NUM_2"
+        endchoice
+        config PSX_SERIAL_PC_TX
+            int "TX gpio pin for the PC uart"
+            range -1 40
+            default -1
+        config PSX_SERIAL_PC_RX
+            int "RX gpio pin for the PC uart"
+            range -1 40
+            default -1
+        choice
+            prompt "PSX SERIAL_PC_BAUD"
+            default PSX_SERIAL_PC_BAUD_115200
+            config PSX_SERIAL_PC_BAUD_9600
+                bool "9600 bps"
+            config PSX_SERIAL_PC_BAUD_115200
+                bool "115200 bps"
+            config PSX_SERIAL_PC_BAUD_460800
+                bool "460800 bps"
+            config PSX_SERIAL_PC_BAUD_510000
+                bool "510000 bps"
+            config PSX_SERIAL_PC_BAUD_921600
+                bool "921600 bps"
+            config PSX_SERIAL_PC_BAUD_2000000
+                bool "2 Mbps"
+        endchoice
+        config PSX_SERIAL_PC_STOP_BITS
+            int "uart stop bits"
+            range 1 2
+            default 2
+    endmenu
+
+    menu "PSX UART"
+        choice
+            prompt "PSX SERIAL_PSX_UART"
+            default PSX_SERIAL_PSX_UART_1
+            config PSX_SERIAL_PSX_UART_1
+                bool "UART_NUM_1"
+                depends on !PSX_SERIAL_PC_UART_1
+            config PSX_SERIAL_PSX_UART_2
+                bool "UART_NUM_2"
+                depends on !PSX_SERIAL_PC_UART_2
+        endchoice
+        config PSX_SERIAL_PSX_TX
+            int "TX gpio pin for the psx uart"
+            range -1 40
+            default 12
+        config PSX_SERIAL_PSX_RX
+            int "RX gpio pin for the psx uart"
+            range -1 40
+            default 13
+        choice
+            prompt "PSX SERIAL_PSX_BAUD"
+            default PSX_SERIAL_PSX_BAUD_115200
+            config PSX_SERIAL_PSX_BAUD_9600
+                bool "9600 bps"
+            config PSX_SERIAL_PSX_BAUD_115200
+                bool "115200 bps"
+            config PSX_SERIAL_PSX_BAUD_518400
+                bool "518400 bps (NoPS /fast option)"
+        endchoice
+        config PSX_SERIAL_PSX_STOP_BITS
+            int "uart stop bits"
+            range 1 2
+            default 2
+    endmenu
+
+    menu "ACTIVITY LED"
+        config PSX_SERIAL_LED
+            int "LED pin on the esp32, set to -1 to disable"
+            range -1 40
+            default 5
+
+        config PSX_SERIAL_LED_INVERT
+            bool "On some boards the LED is on when set to 0 and off when set to 1, set this to make it work then"
+            default y
+    endmenu
+
+endmenu
