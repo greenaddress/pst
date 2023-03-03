@@ -342,6 +342,48 @@ static void handle_debug_input()
 #endif
 }
 
+#ifdef CONFIG_PSX_HANDLE_NOPS_REQUESTS
+static const uint8_t nops_fast[] = { 0x46, 0x41, 0x53, 0x54 };
+// after we notice this is written wait about 100 ms and switch baudrate
+// unless we are already on the fast baudrate
+
+static const uint8_t nops_slow[] = { 0x53, 0x4C, 0x4F, 0x57 };
+// after we receive this we assume we are already in fast mode (we can check though)
+// we wait 100 ms  then we switch to 115200
+
+static void handle_nops(const uint8_t* nops_sig)
+{
+    esp_err_t err;
+    bool flag = false;
+    if (!memcmp(nops_sig, nops_fast, sizeof(nops_fast))) {
+        ESP_LOGI(TAG, "Request to setup fast 510000 baud detected");
+        vTaskDelay(50 / portTICK_RATE_MS);
+        err = uart_set_baudrate(PSX_UART, 520000);
+        ESP_LOGI(TAG, "Uart set psx baud result %d (%d is ok)", err, ESP_OK);
+        err = uart_set_baudrate(PC_UART, 520000);
+        ESP_LOGI(TAG, "Uart set pc baud result %d (%d is ok)", err, ESP_OK);
+        flag = true;
+    }
+    if (!memcmp(nops_sig, nops_slow, sizeof(nops_slow))) {
+        ESP_LOGI(TAG, "Request to setup slow 115200/115200 baud detected");
+        vTaskDelay(50 / portTICK_RATE_MS);
+        err = uart_set_baudrate(PSX_UART, 115200);
+        ESP_LOGI(TAG, "Uart set psx baud result %d (%d is ok)", err, ESP_OK);
+        err = uart_set_baudrate(PC_UART, 115200);
+        ESP_LOGI(TAG, "Uart set pc baud result %d (%d is ok)", err, ESP_OK);
+        flag = true;
+    }
+    if (flag) {
+        uint32_t baud_rate = 0;
+
+        err = uart_get_baudrate(PSX_UART, &baud_rate);
+        ESP_LOGI(TAG, "Uart for psx has baudrate reported of %d and err of %d (%d is ok)", baud_rate, err, ESP_OK);
+        err = uart_get_baudrate(PC_UART, &baud_rate);
+        ESP_LOGI(TAG, "Uart for pc has baudrate reported of %d and err of %d (%d is ok)", baud_rate, err, ESP_OK);
+    }
+}
+#endif
+
 static void mainloop(void)
 {
     uint8_t* output_buffer = malloc(BUFFER_SIZE);
@@ -356,8 +398,14 @@ static void mainloop(void)
     assert(listensock_debug != -1);
 #endif
 
+#ifdef CONFIG_PSX_HANDLE_NOPS_REQUESTS
+    uint8_t nops_sig[sizeof(nops_fast)];
+#endif
     while (1) {
 
+#ifdef CONFIG_PSX_HANDLE_NOPS_REQUESTS
+        memset(output_buffer, 0, sizeof(nops_sig));
+#endif
         len = uart_read_bytes(PC_UART, output_buffer, BUFFER_SIZE, 10 / portTICK_RATE_MS);
         debug_data("pc uart", output_buffer, len);
         set_led_brightness(len);
@@ -367,6 +415,10 @@ static void mainloop(void)
         debug_data("tcp", output_buffer, len);
         set_led_brightness(len);
         write_uart(PSX_UART, output_buffer, len);
+
+#ifdef CONFIG_PSX_HANDLE_NOPS_REQUESTS
+        memcpy(nops_sig, output_buffer, sizeof(nops_sig));
+#endif
 
         len = uart_read_bytes(PSX_UART, output_buffer, BUFFER_SIZE, 10 / portTICK_RATE_MS);
         debug_data("psx uart", output_buffer, len);
@@ -378,6 +430,9 @@ static void mainloop(void)
 #ifdef CONFIG_PSX_ESP_DEBUG_LOGS
         tcp_accept_new_connections(listensock_debug, &sock_debug);
         handle_debug_input();
+#endif
+#ifdef CONFIG_PSX_HANDLE_NOPS_REQUESTS
+        handle_nops(output_buffer);
 #endif
     }
 }

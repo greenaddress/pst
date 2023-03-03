@@ -134,4 +134,10 @@ menu "ESP PSX TOOLS"
             default y
     endmenu
 
+    config PSX_HANDLE_NOPS_REQUESTS
+        bool "Enable auto updating baud rate on nops /slow /fast requests"
+        default n
+        help
+      With this option on, when the esp detects requests for slow or fast baud transmission from nops it will automatically adjust the baud speed.
+
 endmenu
