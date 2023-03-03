@@ -2,6 +2,7 @@
 #include <driver/uart.h>
 #include <errno.h>
 #include <esp_event.h>
+#include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
@@ -107,7 +108,7 @@
 
 static const char* TAG = "ESP_PSX_TOOLS";
 
-static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+static void event_h(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
     if (event_base == WIFI_EVENT && (event_id == WIFI_EVENT_STA_DISCONNECTED || event_id == WIFI_EVENT_STA_START)) {
         esp_wifi_connect();
@@ -122,7 +123,9 @@ static void setup_wifi(void)
     ESP_ERROR_CHECK(esp_netif_init());
 
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    esp_netif_t* netif = esp_netif_create_default_wifi_sta();
+    assert(netif);
+    ESP_ERROR_CHECK(esp_netif_set_hostname(netif, TAG));
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -130,9 +133,9 @@ static void setup_wifi(void)
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
     ESP_ERROR_CHECK(
-        esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, &instance_any_id));
+        esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_h, NULL, &instance_any_id));
     ESP_ERROR_CHECK(
-        esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
+        esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_h, NULL, &instance_got_ip));
 
     wifi_config_t wifi_config = {
         .sta = {
@@ -184,7 +187,7 @@ static void setup_serial(void)
     uart_set_pin(PSX_UART, CONFIG_PSX_SERIAL_PSX_TX, CONFIG_PSX_SERIAL_PSX_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 }
 
-static void set_led_brightness(size_t len)
+static void update_led_flicker(size_t len)
 {
 #if CONFIG_PSX_SERIAL_LED != -1
     gpio_set_level(CONFIG_PSX_SERIAL_LED, !len ^ CONFIG_PSX_SERIAL_LED_INVERT);
@@ -298,7 +301,7 @@ static int tcplogger(const char* message, va_list fmt)
 }
 #endif
 
-static void debug_data(const char* source, const uint8_t* data, size_t len)
+static void debug_data(const char* source, const void* data, size_t len)
 {
 #ifdef CONFIG_PSX_ESP_DEBUG_LOGS
     if (len) {
@@ -308,7 +311,7 @@ static void debug_data(const char* source, const uint8_t* data, size_t len)
 #endif
 }
 
-static void handle_debug_input()
+static void handle_debug_input(void)
 {
 #ifdef CONFIG_PSX_ESP_DEBUG_LOGS
     uint8_t t;
@@ -342,6 +345,24 @@ static void handle_debug_input()
 #endif
 }
 
+#ifdef CONFIG_PSX_ESP_ENABLE_WEBSERVER
+SemaphoreHandle_t mutex;
+#endif
+static void take_mutex(void)
+{
+#ifdef CONFIG_PSX_ESP_ENABLE_WEBSERVER
+    while (xSemaphoreTake(mutex, 30 / portTICK_RATE_MS) != pdTRUE) {
+        vTaskDelay(10 / portTICK_RATE_MS);
+    }
+#endif
+}
+static void give_mutex(void)
+{
+#ifdef CONFIG_PSX_ESP_ENABLE_WEBSERVER
+    xSemaphoreGive(mutex);
+#endif
+}
+
 static void mainloop(void)
 {
     uint8_t* output_buffer = malloc(BUFFER_SIZE);
@@ -357,20 +378,25 @@ static void mainloop(void)
 #endif
 
     while (1) {
-
         len = uart_read_bytes(PC_UART, output_buffer, BUFFER_SIZE, 10 / portTICK_RATE_MS);
         debug_data("pc uart", output_buffer, len);
-        set_led_brightness(len);
+        update_led_flicker(len);
+        take_mutex();
         write_uart(PSX_UART, output_buffer, len);
+        give_mutex();
 
         len = tcp_read_bytes(&sock, output_buffer, BUFFER_SIZE);
         debug_data("tcp", output_buffer, len);
-        set_led_brightness(len);
+        update_led_flicker(len);
+        take_mutex();
         write_uart(PSX_UART, output_buffer, len);
+        give_mutex();
 
+        take_mutex();
         len = uart_read_bytes(PSX_UART, output_buffer, BUFFER_SIZE, 10 / portTICK_RATE_MS);
+        give_mutex();
         debug_data("psx uart", output_buffer, len);
-        set_led_brightness(len);
+        update_led_flicker(len);
         write_uart(PC_UART, output_buffer, len);
         tcp_write_bytes(&sock, output_buffer, len);
 
@@ -399,13 +425,181 @@ static void setup_logging(void)
 #endif
 }
 
+#ifdef CONFIG_PSX_ESP_ENABLE_WEBSERVER
+extern const uint8_t htmlstart[] asm("_binary_index_html_gz_start");
+extern const uint8_t htmlend[] asm("_binary_index_html_gz_end");
+
+esp_err_t html_h(httpd_req_t* req)
+{
+    httpd_resp_set_type(req, HTTPD_TYPE_TEXT);
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_send(req, (char*)htmlstart, htmlend - htmlstart);
+    return ESP_OK;
+}
+
+#define EXE_JUMP_ADDR 16
+#define EXE_BASE_WRITE_ADDR 24
+#define CHUNK_SIZE 2048
+#define UART_CHUNK_SIZE 120
+
+static uint8_t ws_pkt_buf[CHUNK_SIZE];
+static uint32_t checksum;
+static uint32_t totallen;
+
+static uint8_t EXE_CMD[] = { 'S', 'E', 'X', 'E' };
+static uint8_t EXE_CMD_REPLY[] = { 'S', 'E', 'X', 'E', 'O', 'K', 'V', '2' };
+static uint8_t EXE_CMD2[] = { 'U', 'P', 'V', '2' };
+static uint8_t EXE_CMD2_REPLY[] = { 'O', 'K', 'A', 'Y' };
+static uint8_t CHECKSUM_CMD[] = { 'C', 'H', 'E', 'K' };
+static uint8_t CHECKSUM_CMD_REPLY[] = { 'M', 'O', 'R', 'E' };
+
+#define WPSX(data, len)                                                                                                \
+    do {                                                                                                               \
+        update_led_flicker(len);                                                                                       \
+        write_uart(PSX_UART, data, len);                                                                               \
+        debug_data(TAG, data, len);                                                                                    \
+    } while (0)
+
+#define RPSX(data, wlen)                                                                                               \
+    do {                                                                                                               \
+        len = uart_read_bytes(PSX_UART, data, wlen, 500 / portTICK_RATE_MS);                                           \
+        assert(len == wlen);                                                                                           \
+        update_led_flicker(wlen);                                                                                      \
+        debug_data("psx uart", data, wlen);                                                                            \
+    } while (0)
+
+#define WS_ACK()                                                                                                       \
+    do {                                                                                                               \
+        ws_pkt.len = 1;                                                                                                \
+        ws_pkt_buf[0] = 1;                                                                                             \
+        return httpd_ws_send_frame(req, &ws_pkt);                                                                      \
+    } while (0)
+
+static esp_err_t ws_h(httpd_req_t* req)
+{
+    if (req->method == HTTP_GET) {
+        ESP_LOGI(TAG, "Received request for ws upgrade");
+        totallen = 0;
+        return ESP_OK;
+    }
+
+    httpd_ws_frame_t ws_pkt = { 0 };
+    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+
+    if (ret != ESP_OK) {
+        ESP_LOGI(TAG, "Couldn't read the frame len");
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "The frame to fetch is of len %d", ws_pkt.len);
+
+    if (!ws_pkt.len) {
+        ESP_LOGI(TAG, "Couldn't read empty frame");
+        return ESP_OK;
+    }
+
+    assert(ws_pkt.len <= sizeof(ws_pkt_buf));
+    ws_pkt.payload = ws_pkt_buf;
+
+    ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+    if (ret != ESP_OK) {
+        ESP_LOGI(TAG, "Couldn't read the frame");
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Got a frame of len %d", ws_pkt.len);
+
+    size_t len = 0;
+
+    if (ws_pkt.len == sizeof(checksum) + sizeof(totallen)) {
+        memcpy(&checksum, ws_pkt_buf, sizeof(checksum));
+        memcpy(&totallen, ws_pkt_buf + sizeof(checksum), sizeof(totallen));
+        char ack[sizeof(EXE_CMD_REPLY)];
+        take_mutex();
+        WPSX(EXE_CMD, sizeof(EXE_CMD));
+        RPSX(ack, sizeof(EXE_CMD_REPLY));
+        assert(!memcmp(ack, EXE_CMD_REPLY, sizeof(EXE_CMD_REPLY)));
+        WPSX(EXE_CMD2, sizeof(EXE_CMD2));
+        RPSX(ack, sizeof(EXE_CMD2_REPLY));
+        assert(!memcmp(ack, EXE_CMD2_REPLY, sizeof(EXE_CMD2_REPLY)));
+        give_mutex();
+        WS_ACK();
+    }
+
+    take_mutex();
+
+    WPSX(ws_pkt_buf, ws_pkt.len);
+
+    if (ws_pkt.len != CHUNK_SIZE) {
+        ESP_LOGI(TAG, "Detected last chunk %d", ws_pkt.len);
+        uint32_t data_left = CHUNK_SIZE - (ws_pkt.len % CHUNK_SIZE);
+        memset(ws_pkt_buf, 0, data_left);
+        WPSX(ws_pkt_buf, data_left);
+    }
+
+    if (totallen) {
+        WPSX(ws_pkt_buf + EXE_JUMP_ADDR, sizeof(uint32_t));
+        WPSX(ws_pkt_buf + EXE_BASE_WRITE_ADDR, sizeof(uint32_t));
+        WPSX(&totallen, sizeof(uint32_t));
+        WPSX(&checksum, sizeof(checksum));
+        give_mutex();
+    }
+
+    if (!totallen) {
+        char ack[sizeof(CHECKSUM_CMD)];
+        RPSX(ack, sizeof(CHECKSUM_CMD));
+        assert(!memcmp(ack, CHECKSUM_CMD, sizeof(CHECKSUM_CMD)));
+        checksum = 0;
+        for (size_t i = 0; i < CHUNK_SIZE; ++i) {
+            checksum += (uint32_t)ws_pkt_buf[i];
+        }
+        WPSX(&checksum, sizeof(checksum));
+        RPSX(ack, sizeof(CHECKSUM_CMD_REPLY));
+        assert(!memcmp(ack, CHECKSUM_CMD_REPLY, sizeof(CHECKSUM_CMD_REPLY)));
+        give_mutex();
+    }
+
+    totallen = 0;
+    WS_ACK();
+}
+
+static const httpd_uri_t webpage
+    = { .uri = "/", .method = HTTP_GET, .handler = html_h, .user_ctx = NULL, .is_websocket = false };
+
+static const httpd_uri_t ws
+    = { .uri = "/ws", .method = HTTP_GET, .handler = ws_h, .user_ctx = NULL, .is_websocket = true };
+
+#endif
+
+void setup_webserver(void)
+{
+#ifdef CONFIG_PSX_ESP_ENABLE_WEBSERVER
+    httpd_handle_t server = NULL;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = CONFIG_PSX_ESP_WS_PORT;
+
+    if (httpd_start(&server, &config) == ESP_OK) {
+        httpd_register_uri_handler(server, &ws);
+        httpd_register_uri_handler(server, &webpage);
+        return;
+    }
+    assert(false);
+#endif
+}
+
 void app_main(void)
 {
+    mutex = xSemaphoreCreateMutex();
+    assert(mutex);
+
     setup_nvs();
     setup_led();
     setup_wifi();
 
     setup_logging();
+    setup_webserver();
+
     setup_serial();
 
     mainloop();
@@ -415,6 +609,5 @@ void app_main(void)
 // add baud rate auto detection
 // add ability for the esp32 to host the wifi if no wifi found or if configured in ap mode explicitly
 // add web page for on the fly configuration changes
-// add web page for drag and drop/ upload of exe
 // add support for logs via uart, assuming is not one of the uart in use
 // test that if wifi disconnects and reconnects the tcp listen still works

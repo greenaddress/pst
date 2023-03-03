@@ -18,6 +18,21 @@ menu "ESP PSX TOOLS"
             default 1
             range 1 65535
 
+        config PSX_ESP_ENABLE_WEBSERVER
+            bool "Enable webserver on the esp32 to upload exes"
+            select HTTPD_WS_SUPPORT
+            default n
+            help
+                Enables a webserver on the esp32 to upload exes
+
+        config PSX_ESP_WS_PORT
+            int "Set webserver port on the esp32"
+            default 3
+            depends on PSX_ESP_ENABLE_WEBSERVER
+            range 1 65535
+            help
+                Set web server port
+
         config PSX_ESP_DEBUG_LOGS
             bool "Enable debug logging for the ESP32"
             default n

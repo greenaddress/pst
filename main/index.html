@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+      #dz {
+        position: fixed;
+        width: 100%;
+        height: 100%;
+        left: 0;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        overflow: auto;
+        background: lime;
+      }
+      #fp {
+        width: 100%;
+        height: 20%;
+        left: 0;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        overflow: auto;
+        visibility: hidden;
+      }
+  </style>
+  <!-- Skips failed missing favicon.ico, we could add one though -->
+  <link rel="icon" href="data:;base64,iVBORw0KGgo=">
+</head>
+<body>
+<div
+  id="dz"
+  ondrop="dh(event);"
+  ondragover="doh(event);">
+    <p>Drag a PSX exe file to this page or click/touch anywhere in the green area to load the exe on Unirom.</p>
+    <progress id="fp" max="100" value="0"> 0% </progress>
+</div>
+<script>
+function add_ct_e() {
+  const dz = document.getElementById("dz");
+  const et = ("ontouchstart" in window) ? "touchstart" : "click";
+  dz.addEventListener(et, () => {
+    const i = document.createElement("input");
+    i.type = "file";
+    i.accept = ".exe";
+    i.addEventListener("change", () => { sf(i.files[0]); }, {once: true});
+    i.click();
+  });
+}
+function sf(f) {
+  const fp = document.getElementById("fp");
+  fp.value = 0;
+  const url =  (window.location.protocol === 'http:' ? 'ws://' : 'wss://') + window.location.host + window.location.pathname + "ws";
+  console.log("Connecting to " + url);
+  var ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = (e) => {
+    console.log("Connection open");
+    const fr = new FileReader();
+    fr.addEventListener('load', () => {
+      console.log("File loaded");
+      const bytes = new Uint8Array(fr.result);
+      fp.max = bytes.byteLength;
+      fp.style.visibility = "visible";
+      let checksum = 0;
+      for (let i = 2048; i < bytes.byteLength; ++i) {
+        checksum = ((checksum + bytes[i]) & 0xFFFFFFFF) >>> 0;
+      }
+      const tbuf = new ArrayBuffer(8);
+      const v = new DataView(tbuf);
+      v.setUint32(0, checksum, true);
+      let padded_len = bytes.byteLength;
+      const reminder = padded_len % 2048;
+      if (reminder > 0) {
+          padded_len += 2048 - reminder;
+      }
+      padded_len -= 2048;
+      v.setUint32(4, padded_len, true);
+      ws.send(tbuf);
+      const sendChunk = (chunk) => {
+        ws.send(chunk);
+        return new Promise((resolve, reject) => {
+          ws.addEventListener('message', (event) => {
+            resolve();
+          }, {once: true});
+        });
+      };
+      const sendChunks = async () => {
+        let offset = 0;
+        while (offset < bytes.byteLength) {
+          const remainingBytes = bytes.byteLength - offset;
+          const chunk = bytes.subarray(offset, offset + Math.min(2048, remainingBytes));
+          await sendChunk(chunk);
+          offset += chunk.byteLength;
+          fp.value = offset;
+        }
+        console.log("File sent successfully");
+      };
+      sendChunks();
+    });
+    fr.readAsArrayBuffer(f);
+  };
+  ws.addEventListener('close', (event) => {
+      console.log("Disconnected");
+  });
+}
+function dh(ev) {
+  ev.preventDefault();
+  if (ev.dataTransfer.items) {
+    [...ev.dataTransfer.items].forEach((item, i) => {
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        sf(file);
+      }
+    });
+  } else {
+    [...ev.dataTransfer.files].forEach((file, i) => {
+      sf(file);
+    });
+  }
+}
+function doh(ev) {
+  ev.preventDefault();
+}
+
+(add_ct_e)();
+</script>
+</body>
+</html>
