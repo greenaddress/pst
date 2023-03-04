@@ -442,7 +442,8 @@ esp_err_t html_h(httpd_req_t* req)
 #define CHUNK_SIZE 2048
 #define UART_CHUNK_SIZE 120
 
-static uint8_t ws_pkt_buf[CHUNK_SIZE];
+static uint8_t ws_pkt_buf[CHUNK_SIZE * 5];
+static uint32_t ws_cnt;
 static uint32_t checksum;
 static uint32_t totallen;
 
@@ -480,6 +481,7 @@ static esp_err_t ws_h(httpd_req_t* req)
     if (req->method == HTTP_GET) {
         ESP_LOGI(TAG, "Received request for ws upgrade");
         totallen = 0;
+        ws_cnt = 0;
         return ESP_OK;
     }
 
@@ -499,8 +501,8 @@ static esp_err_t ws_h(httpd_req_t* req)
         return ESP_OK;
     }
 
-    assert(ws_pkt.len <= sizeof(ws_pkt_buf));
-    ws_pkt.payload = ws_pkt_buf;
+    assert(ws_pkt.len <= sizeof(ws_pkt_buf) - ws_cnt);
+    ws_pkt.payload = ws_pkt_buf + ws_cnt;
 
     ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
     if (ret != ESP_OK) {
@@ -509,10 +511,9 @@ static esp_err_t ws_h(httpd_req_t* req)
     }
 
     ESP_LOGI(TAG, "Got a frame of len %d", ws_pkt.len);
-
+    ws_cnt += ws_pkt.len;
     size_t len = 0;
-
-    if (ws_pkt.len == sizeof(checksum) + sizeof(totallen)) {
+    if (ws_cnt == sizeof(checksum) + sizeof(totallen)) {
         memcpy(&checksum, ws_pkt_buf, sizeof(checksum));
         memcpy(&totallen, ws_pkt_buf + sizeof(checksum), sizeof(totallen));
         char ack[sizeof(EXE_CMD_REPLY)];
@@ -524,43 +525,45 @@ static esp_err_t ws_h(httpd_req_t* req)
         RPSX(ack, sizeof(EXE_CMD2_REPLY));
         assert(!memcmp(ack, EXE_CMD2_REPLY, sizeof(EXE_CMD2_REPLY)));
         give_mutex();
+        ws_cnt = 0;
+        WS_ACK();
+    }
+
+    if (ws_cnt < CHUNK_SIZE) {
         WS_ACK();
     }
 
     take_mutex();
+    size_t offset = 0;
+    while (ws_cnt >= CHUNK_SIZE) {
 
-    WPSX(ws_pkt_buf, ws_pkt.len);
+        WPSX(ws_pkt_buf + offset, CHUNK_SIZE);
 
-    if (ws_pkt.len != CHUNK_SIZE) {
-        ESP_LOGI(TAG, "Detected last chunk %d", ws_pkt.len);
-        uint32_t data_left = CHUNK_SIZE - (ws_pkt.len % CHUNK_SIZE);
-        memset(ws_pkt_buf, 0, data_left);
-        WPSX(ws_pkt_buf, data_left);
-    }
-
-    if (totallen) {
-        WPSX(ws_pkt_buf + EXE_JUMP_ADDR, sizeof(uint32_t));
-        WPSX(ws_pkt_buf + EXE_BASE_WRITE_ADDR, sizeof(uint32_t));
-        WPSX(&totallen, sizeof(uint32_t));
-        WPSX(&checksum, sizeof(checksum));
-        give_mutex();
-    }
-
-    if (!totallen) {
-        char ack[sizeof(CHECKSUM_CMD)];
-        RPSX(ack, sizeof(CHECKSUM_CMD));
-        assert(!memcmp(ack, CHECKSUM_CMD, sizeof(CHECKSUM_CMD)));
-        checksum = 0;
-        for (size_t i = 0; i < CHUNK_SIZE; ++i) {
-            checksum += (uint32_t)ws_pkt_buf[i];
+        if (totallen) {
+            WPSX(ws_pkt_buf + offset + EXE_JUMP_ADDR, sizeof(uint32_t));
+            WPSX(ws_pkt_buf + offset + EXE_BASE_WRITE_ADDR, sizeof(uint32_t));
+            WPSX(&totallen, sizeof(uint32_t));
+            WPSX(&checksum, sizeof(checksum));
+            totallen = 0;
+        } else {
+            char ack[sizeof(CHECKSUM_CMD)];
+            RPSX(ack, sizeof(CHECKSUM_CMD));
+            assert(!memcmp(ack, CHECKSUM_CMD, sizeof(CHECKSUM_CMD)));
+            checksum = 0;
+            for (size_t i = 0; i < CHUNK_SIZE; ++i) {
+                checksum += (uint32_t)(ws_pkt_buf + offset)[i];
+            }
+            WPSX(&checksum, sizeof(checksum));
+            RPSX(ack, sizeof(CHECKSUM_CMD_REPLY));
+            assert(!memcmp(ack, CHECKSUM_CMD_REPLY, sizeof(CHECKSUM_CMD_REPLY)));
         }
-        WPSX(&checksum, sizeof(checksum));
-        RPSX(ack, sizeof(CHECKSUM_CMD_REPLY));
-        assert(!memcmp(ack, CHECKSUM_CMD_REPLY, sizeof(CHECKSUM_CMD_REPLY)));
-        give_mutex();
+        ws_cnt -= CHUNK_SIZE;
+        offset += CHUNK_SIZE;
     }
-
-    totallen = 0;
+    if (ws_cnt > 0) {
+        memmove(ws_pkt_buf, ws_pkt_buf + offset, ws_cnt);
+    }
+    give_mutex();
     WS_ACK();
 }
 

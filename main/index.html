@@ -79,6 +79,10 @@ function sf(f) {
       ws.send(tbuf);
       const sendChunk = (chunk) => {
         ws.send(chunk);
+        const chunk_rem = chunk.byteLength % 2048;
+        if (chunk_rem) {
+            ws.send(new Uint8Array(2048 - chunk_rem));
+        }
         return new Promise((resolve, reject) => {
           ws.addEventListener('message', (event) => {
             resolve();
@@ -89,7 +93,7 @@ function sf(f) {
         let offset = 0;
         while (offset < bytes.byteLength) {
           const remainingBytes = bytes.byteLength - offset;
-          const chunk = bytes.subarray(offset, offset + Math.min(2048, remainingBytes));
+          const chunk = bytes.subarray(offset, offset + Math.min(1024 * 4, remainingBytes));
           await sendChunk(chunk);
           offset += chunk.byteLength;
           fp.value = offset;
