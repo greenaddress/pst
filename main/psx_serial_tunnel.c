@@ -572,7 +572,7 @@ static const httpd_uri_t ws
 
 #endif
 
-void setup_webserver(void)
+static void setup_webserver(void)
 {
 #ifdef CONFIG_PSX_ESP_ENABLE_WEBSERVER
     httpd_handle_t server = NULL;
@@ -588,10 +588,17 @@ void setup_webserver(void)
 #endif
 }
 
-void app_main(void)
+static void setup_mutex(void)
 {
+#ifdef CONFIG_PSX_ESP_ENABLE_WEBSERVER
     mutex = xSemaphoreCreateMutex();
     assert(mutex);
+#endif
+}
+
+void app_main(void)
+{
+    setup_mutex();
 
     setup_nvs();
     setup_led();
